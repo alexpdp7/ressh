@@ -1,0 +1,176 @@
+on: [push]
+
+name: Continuous integration
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        runs-on:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: rustup component add rustfmt
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: rustup component add clippy
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -- -D warnings -D clippy::pedantic
+
+  build-release-linux:
+    needs: [check, test, fmt, clippy]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        runs-on:
+          - ubuntu-latest
+        arch:
+          - x86_64
+          # - aarch64 TODO: broken for some reason?
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: ${{ matrix.arch }}-unknown-linux-gnu
+      - run: sudo apt install -y gcc-aarch64-linux-gnu
+        if: "${{ matrix.arch == 'aarch64' }}"
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.arch }}-unknown-linux-gnu
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ressh-${{ matrix.runs-on }}-${{ matrix.arch }}
+          path: target/${{ matrix.arch }}-unknown-linux-gnu/release/ressh
+
+  build-release-mac:
+    needs: [check, test, fmt, clippy]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        runs-on:
+          - macos-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          target: x86_64-apple-darwin
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target=x86_64-apple-darwin
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target=aarch64-apple-darwin
+      - run: lipo -create -output target/ressh target/x86_64-apple-darwin/release/ressh target/aarch64-apple-darwin/release/ressh
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ressh-${{ matrix.runs-on }}
+          path: target/ressh
+
+  build-release-windows:
+    needs: [check, test, fmt, clippy]
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        runs-on:
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ressh-${{ matrix.runs-on }}
+          path: target/release/ressh.exe
+
+  create-release:
+    needs: [build-release-linux,build-release-mac,build-release-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+      - name: Create release
+        run: |
+          mv ressh-ubuntu-latest-x86_64/ressh ressh-linux-x86_64
+          # mv ressh-ubuntu-latest-aarch64/ressh ressh-linux-aarch64 TODO: broken for some reason
+          mv ressh-macos-latest/ressh ressh-macos
+          mv ressh-windows-latest/ressh.exe ressh.exe
+          d=$(date "+%Y-%m-%d-%H%M")
+          gh release create --generate-notes -t "Release $d" v$d ressh-linux-x86_64 ressh-macos ressh.exe # ressh-linux-aarch64 TODO: broken for some reason
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
